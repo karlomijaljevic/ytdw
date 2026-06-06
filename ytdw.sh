@@ -71,8 +71,7 @@ f_check_dependencies() {
   command -v yt-dlp >/dev/null 2>&1 || die "program 'yt-dlp' not found"
   command -v ffmpeg >/dev/null 2>&1 || die "program 'ffmpeg' not found"
 
-  g_temp_dir="$(mktemp -d)"
-}
+  g_temp_dir="$(mktemp -d)" || die "failed to create temp directory"
 
 # Downloads audio from a single URL into dir. Reports success/failure to stdout.
 f_dw_audio() {
