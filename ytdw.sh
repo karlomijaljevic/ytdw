@@ -72,6 +72,7 @@ f_check_dependencies() {
   command -v ffmpeg >/dev/null 2>&1 || die "program 'ffmpeg' not found"
 
   g_temp_dir="$(mktemp -d)" || die "failed to create temp directory"
+}
 
 # Downloads audio from a single URL into dir. Reports success/failure to stdout.
 f_dw_audio() {
@@ -104,6 +105,7 @@ f_dw_audio() {
     -o "$name" \
     "$url"; then
     printf "${c_red}Failed to download audio from URL '%s'!${c_normal}\n" "$url"
+    return 1
   else
     printf "${c_green}Audio from URL '%s' downloaded successfully!${c_normal}\n" "$url"
   fi
@@ -115,6 +117,7 @@ f_parse_data_and_dw() {
   local start_time
   local end_time
   local runtime
+  local download_failed=0
 
   start_time="$(date +%s)"
 
@@ -145,19 +148,25 @@ f_parse_data_and_dw() {
 
     local url
     for url in "${urls[@]}"; do
-      f_dw_audio "$url" "$dir"
+      if ! f_dw_audio "$url" "$dir"; then
+        download_failed=1
+      fi
       printf '\n'
     done
 
     rm -f "$g_temp_file"
     g_temp_file=""
   else
-    f_dw_audio "$g_url" "$dir"
+    if ! f_dw_audio "$g_url" "$dir"; then
+      download_failed=1
+    fi
   fi
 
   end_time="$(date +%s)"
   runtime=$(( end_time - start_time ))
   printf '\nTotal program runtime lasted for %d seconds!\n\n' "$runtime"
+
+  return "$download_failed"
 }
 
 f_main() {
