@@ -18,9 +18,10 @@
 #
 # Use this script to download audio from YouTube. It can either download a
 # single audio file or a playlist. The audio will be downloaded in OPUS format
-# and saved in the specified directory. If no directory is specified, it will
-# be saved in the default directory which is set to $HOME/music. The script
-# uses yt-dlp for downloading and aria2c for downloading the audio files.
+# by default, or in the format passed via -f/--format, and saved in the
+# specified directory. If no directory is specified, it will be saved in the
+# default directory which is set to $HOME/music. The script uses yt-dlp for
+# downloading and aria2c for downloading the audio files.
 #
 
 set -euo pipefail
@@ -36,10 +37,12 @@ c_green="\e[1;32m"
 
 # Constants
 g_user_agent="Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"
+g_valid_audio_formats="best aac alac flac m4a mp3 opus vorbis wav"
 
 # Runtime state (populated in f_main)
 g_url=""
 g_audio_dir="${XDG_MUSIC_DIR:-"$HOME/music"}"
+g_audio_format="opus"
 g_temp_dir=""
 g_dir_or_audio_name=""
 g_temp_file=""
@@ -55,9 +58,23 @@ die() {
 }
 
 usage() {
-  printf 'Usage: %s <url> [name]\n' "$(basename "$0")" >&2
-  printf '  url   YouTube video or playlist URL\n' >&2
-  printf '  name  output filename (single track) or subdirectory name (playlist)\n' >&2
+  printf 'Usage: %s [-f format] <url> [name]\n' "$(basename "$0")" >&2
+  printf '  url            YouTube video or playlist URL\n' >&2
+  printf '  name           output filename (single track) or subdirectory name (playlist)\n' >&2
+  printf '  -f, --format   audio output format (default: opus)\n' >&2
+  printf '                 one of: %s\n' "$g_valid_audio_formats" >&2
+}
+
+# Checks that the requested audio format is one yt-dlp's --audio-format accepts.
+f_validate_audio_format() {
+  local format="$1"
+  local valid
+
+  for valid in $g_valid_audio_formats; do
+    [[ "$format" == "$valid" ]] && return 0
+  done
+
+  die "unsupported audio format '$format' (expected one of: $g_valid_audio_formats)"
 }
 
 cleanup() {
@@ -100,6 +117,7 @@ f_dw_audio() {
       --split=16 \
     " \
     --extract-audio \
+    --audio-format "$g_audio_format" \
     --audio-quality 0 \
     --postprocessor-args "-q:a 0 -map a" \
     -o "$name" \
@@ -176,6 +194,11 @@ f_main() {
         usage
         exit 0
         ;;
+      -f|--format)
+        [[ $# -lt 2 ]] && die "option '$1' requires an argument"
+        g_audio_format="$2"
+        shift
+        ;;
       --)
         shift
         break
@@ -194,6 +217,8 @@ f_main() {
 
   g_url="$1"
   g_dir_or_audio_name="${2:-}"
+
+  f_validate_audio_format "$g_audio_format"
 
   trap cleanup EXIT
 
