@@ -23,19 +23,11 @@
 # uses yt-dlp for downloading and aria2c for downloading the audio files.
 #
 
+set -euo pipefail
+
 # =========================== #
 # ========= GLOBALS ========= #
 # =========================== #
-
-# User defined flies and directories
-g_url="$1"
-g_audio_dir="${AUDIO_DIRECTORY:-"$HOME/music"}"
-g_temp_dir="/tmp/ytdw"
-
-# Control variables used between multiple functions
-g_dir_or_audio_name="$2"
-g_temp_file=""
-g_is_playlist=0
 
 # Colors
 c_normal="\e[0m"
@@ -45,48 +37,56 @@ c_green="\e[1;32m"
 # Constants
 g_user_agent="Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0"
 
+# Runtime state (populated in f_main)
+g_url=""
+g_audio_dir="${XDG_MUSIC_DIR:-"$HOME/music"}"
+g_temp_dir=""
+g_dir_or_audio_name=""
+g_temp_file=""
+g_is_playlist=0
+
 # =========================== #
 # ======== FUNCTIONS ======== #
 # =========================== #
 
-# Checks for the program dependencies, which are: aria2c, yt-dlp and ffmpeg.
-# And creates the temporary directory in $g_temp_dir
-function f_check_dependencies {
-   if ! command -v aria2c &> /dev/null; then
-    echo -e "${c_red}Program 'aria2' not found!$c_normal"
-    exit 1
-  fi
-
-  if ! command -v yt-dlp &> /dev/null; then
-    echo -e "${c_red}Program 'yt-dlp' not found!$c_normal"
-    exit 1
-  fi
-
-  if ! command -v ffmpeg &> /dev/null; then
-    echo -e "${c_red}Program 'ffmpeg' not found!$c_normal"
-    exit 1
-  fi
-
-  if [ ! -d "$g_temp_dir" ]; then
-    mkdir -p "$g_temp_dir"
-  fi
+die() {
+  printf "${c_red}error: %s${c_normal}\n" "$*" >&2
+  exit 1
 }
 
-# Downloads audio. Takes two parameters. First is the audio URL and seconds is
-# the directory where the audio will be located. The "return" of this function
-# is the return code of the yt-dlp program call.
-function f_dw_audio {
+usage() {
+  printf 'Usage: %s <url> [name]\n' "$(basename "$0")" >&2
+  printf '  url   YouTube video or playlist URL\n' >&2
+  printf '  name  output filename (single track) or subdirectory name (playlist)\n' >&2
+}
+
+cleanup() {
+  [[ -f "$g_temp_file" ]] && rm -f "$g_temp_file"
+  [[ -d "$g_temp_dir" ]] && rm -rf "$g_temp_dir"
+}
+
+# Checks for program dependencies (aria2c, yt-dlp, ffmpeg) and creates the temp dir.
+f_check_dependencies() {
+  command -v aria2c >/dev/null 2>&1 || die "program 'aria2' not found"
+  command -v yt-dlp >/dev/null 2>&1 || die "program 'yt-dlp' not found"
+  command -v ffmpeg >/dev/null 2>&1 || die "program 'ffmpeg' not found"
+
+  g_temp_dir="$(mktemp -d)"
+}
+
+# Downloads audio from a single URL into dir. Reports success/failure to stdout.
+f_dw_audio() {
   local url="$1"
   local dir="$2"
-  local name=""
+  local name
 
-  if [ $g_is_playlist -eq 1 ] || [ -z "$g_dir_or_audio_name" ]; then
+  if [[ "$g_is_playlist" -eq 1 ]] || [[ -z "$g_dir_or_audio_name" ]]; then
     name="$dir/%(title)s.%(ext)s"
   else
     name="$dir/$g_dir_or_audio_name.%(ext)s"
   fi
 
-  echo "Downloading video from URL '$url'"
+  printf 'Downloading video from URL '\''%s'\''\n' "$url"
 
   if ! yt-dlp --quiet \
     --no-warnings \
@@ -100,41 +100,37 @@ function f_dw_audio {
       --split=16 \
     " \
     --extract-audio \
-    --prefer-ffmpeg \
     --audio-quality 0 \
     --postprocessor-args "-q:a 0 -map a" \
     -o "$name" \
     "$url"; then
-    echo -e "${c_red}Failed to download audio from URL '$url'!$c_normal"
+    printf "${c_red}Failed to download audio from URL '%s'!${c_normal}\n" "$url"
   else
-    echo -e "${c_green}Audio from URL '$url' downloaded successfully!$c_normal"
+    printf "${c_green}Audio from URL '%s' downloaded successfully!${c_normal}\n" "$url"
   fi
 }
 
-# Parses the command line parameter which can either be a playlist or a single
-# audio from YT.
-function f_parse_data_and_dw {
+# Determines whether the URL is a playlist or single track and dispatches downloads.
+f_parse_data_and_dw() {
   local dir="$g_audio_dir"
-  local start_time=0
-  local end_time=0
-  local runtime=0
+  local start_time
+  local end_time
+  local runtime
 
   start_time="$(date +%s)"
 
   if [[ "$g_url" == *"playlist"* ]]; then
-    echo "Starting to download playlist at URL: $g_url"
+    printf 'Starting to download playlist at URL: %s\n' "$g_url"
 
     g_is_playlist=1
 
-    if [ -n "$g_dir_or_audio_name" ]; then
+    if [[ -n "$g_dir_or_audio_name" ]]; then
       dir="$g_audio_dir/$g_dir_or_audio_name"
     else
       dir="$g_audio_dir/$(date '+%H%M%S%d%m')-playlist"
     fi
 
-    if [ ! -d "$dir" ]; then
-      mkdir -p "$dir"
-    fi
+    [[ -d "$dir" ]] || mkdir -p "$dir"
 
     g_temp_file="${g_temp_dir}/$(date '+%H%M%S%d%m')-playlist.txt"
 
@@ -145,33 +141,56 @@ function f_parse_data_and_dw {
       --print-to-file url \
       "$g_temp_file" "$g_url"
 
-    readarray -t urls < "$g_temp_file"
+    local -a urls
+    mapfile -t urls < "$g_temp_file"
 
+    local url
     for url in "${urls[@]}"; do
       f_dw_audio "$url" "$dir"
-      echo
+      printf '\n'
     done
 
-    rm "$g_temp_file"
+    rm -f "$g_temp_file"
+    g_temp_file=""
   else
     f_dw_audio "$g_url" "$dir"
   fi
 
   end_time="$(date +%s)"
-  runtime=$((end_time-start_time))
-  echo
-  echo "Total program runtime lasted for $runtime seconds!"
-  echo
-  exit 0
+  runtime=$(( end_time - start_time ))
+  printf '\nTotal program runtime lasted for %d seconds!\n\n' "$runtime"
 }
 
-# =========================== #
-# =========== MAIN ========== #
-# =========================== #
+f_main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "unknown option: $1"
+        ;;
+      *)
+        break
+        ;;
+    esac
+    shift
+  done
 
-function f_main {
+  [[ $# -lt 1 ]] && { usage; exit 1; }
+
+  g_url="$1"
+  g_dir_or_audio_name="${2:-}"
+
+  trap cleanup EXIT
+
   f_check_dependencies
   f_parse_data_and_dw
 }
 
-f_main
+f_main "$@"
