@@ -12,7 +12,7 @@ parameter is the URL to the video/playlist and the second parameter, which is
 an optional one is the video/directory name.
 
 It will save audio either into a directory defined by the environment variable
-`AUDIO_DIRECTORY` and if none is found it will save it into `$HOME/music`.
+`XDG_MUSIC_DIR` and if none is found it will save it into `$HOME/music`.
 
 The audio will be saved in the `opus` format, which is a modern audio codec
 used by YouTube. If you want to change the format, you can do so by editing
