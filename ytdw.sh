@@ -478,7 +478,7 @@ f_parse_data_and_dw() {
         fi
         printf '\n'
       done
-    else
+    elif [[ "$g_interactive" -ne 1 ]]; then
       printf 'No tracks selected; nothing to download.\n'
     fi
 
@@ -576,7 +576,7 @@ f_main() {
     g_interactive=0
   fi
 
-  [[ "$g_interactive" -eq 1 && ! -r /dev/tty ]] &&
+  [[ "$g_interactive" -eq 1 && ( ! -r /dev/tty || ! -w /dev/tty ) ]] &&
     die "--interactive requires an interactive terminal"
 
   [[ "$g_is_playlist" -eq 1 && -n "$g_title" ]] &&
