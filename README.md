@@ -7,9 +7,8 @@ programs to works properly:
 - [ffmpeg](https://ffmpeg.org/)
 - [aria2](https://github.com/aria2/aria2)
 
-It can download playlists as well. It accepts two positional parameters and
-an optional flag. The first parameter is the URL to the video/playlist and the
-second parameter, which is optional, is the video/directory name.
+It can download playlists as well. It accepts a single mandatory positional
+parameter, the URL to the video/playlist, plus a set of optional flags.
 
 It will save audio either into a directory defined by the environment variable
 `XDG_MUSIC_DIR` and if none is found it will save it into `$HOME/music`.
@@ -21,21 +20,50 @@ audio codec used by YouTube. To save it in a different format, pass
 `vorbis`, `wav`. For example, to download in `mp3` instead:
 
 ```sh
-./ytdw.sh -f mp3 "https://www.youtube.com/watch?v=eVTXPUF4Oz4&pp=ygUKaW4gdGhlIGVuZA%3D%3D" "In The End"
+./ytdw.sh -f mp3 --title "In The End" "https://www.youtube.com/watch?v=eVTXPUF4Oz4&pp=ygUKaW4gdGhlIGVuZA%3D%3D"
 ```
+
+## Options
+
+- `-f, --format <fmt>`: audio output format to transcode to (default: `opus`),
+  one of `best`, `aac`, `alac`, `flac`, `m4a`, `mp3`, `opus`, `vorbis`, `wav`.
+- `-q, --quality <tier>`: source audio quality tier to download from YouTube
+  (default: `best`), one of `best`, `medium`, `low`. YouTube only serves two
+  real source tiers per codec — roughly 48kbps (`low`) and 128kbps (`medium`)
+  — there is no lossless source; `best` simply picks the highest available.
+- `--no-transcode`: skip re-encoding entirely and remux/extract the native
+  audio stream as-is (faster, no quality loss). Mutually exclusive with
+  `-f`/`--format`.
+- `-t, --thumbnail`: embed the video's thumbnail into the audio file as cover
+  art.
+- `--title <name>`: track title; also used as the output filename. Only valid
+  for single-track URLs (the script exits with an error if combined with a
+  playlist URL — use `--album` to name a playlist's output directory).
+- `--artist <name>`: artist tag embedded into every downloaded track.
+- `--album <name>`: album tag embedded into every track; for playlists it is
+  also used as the output subdirectory name.
+- `--description <text>`: description tag embedded into every track.
+
+`--artist`, `--album`, `--description` and (for single tracks) `--title` are
+embedded as metadata regardless of how they are supplied. Any of them left
+unset are prompted for interactively when the script is run from a terminal —
+piped or scripted invocations skip the prompts so a bare `ytdw <url>` stays
+fully unattended. `upload_date`, `duration` and `channel` are always taken
+from yt-dlp's own metadata and embedded automatically; they are never
+prompted for.
 
 ## Example use case
 
 To download the audio of [In The End](https://www.youtube.com/watch?v=eVTXPUF4Oz4&pp=ygUKaW4gdGhlIGVuZA%3D%3D)
-from Linkin Park.
+from Linkin Park, embedding the thumbnail as cover art:
 
 ```sh
-./ytdw.sh "https://www.youtube.com/watch?v=eVTXPUF4Oz4&pp=ygUKaW4gdGhlIGVuZA%3D%3D" "In The End"
+./ytdw.sh -t --title "In The End" --artist "Linkin Park" "https://www.youtube.com/watch?v=eVTXPUF4Oz4&pp=ygUKaW4gdGhlIGVuZA%3D%3D"
 ```
 
 To download the entire playlist of their [Hybrid Theory](https://www.youtube.com/playlist?list=PLE6dlt5SQB8r5oagkd_cwA6FlhGLGlxef)
-album:
+album, keeping the native source stream instead of transcoding:
 
 ```sh
-./ytdw.sh "https://www.youtube.com/playlist?list=PLE6dlt5SQB8r5oagkd_cwA6FlhGLGlxef" "Hybrid Theory"
+./ytdw.sh --no-transcode --album "Hybrid Theory" --artist "Linkin Park" "https://www.youtube.com/playlist?list=PLE6dlt5SQB8r5oagkd_cwA6FlhGLGlxef"
 ```

@@ -163,7 +163,7 @@ f_dw_audio() {
   if [[ "$g_is_playlist" -eq 1 ]]; then
     name="$dir/%(title)s.%(ext)s"
   elif [[ -n "$g_title" ]]; then
-    name="$dir/$g_title.%(ext)s"
+    name="$dir/${g_title//%/%%}.%(ext)s"
   else
     name="$dir/%(title)s.%(ext)s"
   fi
@@ -180,7 +180,7 @@ f_dw_audio() {
     audio_format="best"
   else
     audio_format="$g_audio_format"
-    args+=(--audio-quality 0 --postprocessor-args "$pp_args")
+    args+=(--audio-quality 0 --postprocessor-args "ExtractAudio:$pp_args")
   fi
 
   args+=(--extract-audio --audio-format "$audio_format")
@@ -194,7 +194,7 @@ f_dw_audio() {
     [[ -n "$g_album" ]] && meta_pp+=" -metadata album=$(f_shquote "$g_album")"
     [[ -n "$g_description" ]] && meta_pp+=" -metadata description=$(f_shquote "$g_description")"
     [[ "$g_is_playlist" -eq 0 && -n "$g_title" ]] && meta_pp+=" -metadata title=$(f_shquote "$g_title")"
-    args+=(--postprocessor-args "$meta_pp")
+    args+=(--postprocessor-args "Metadata:$meta_pp")
   fi
 
   if [[ "$g_embed_thumbnail" -eq 1 ]]; then
@@ -378,6 +378,15 @@ f_main() {
     die "--no-transcode and -f/--format are mutually exclusive"
 
   [[ "$g_url" == *"playlist"* ]] && g_is_playlist=1
+
+  [[ "$g_is_playlist" -eq 1 && -n "$g_title" ]] &&
+    die "--title only applies to single-track URLs (use --album for playlists)"
+
+  # Path separators would otherwise let --title/--album escape the intended
+  # output directory (album is used verbatim as a playlist subdirectory, and
+  # title as part of the per-file -o template).
+  g_title="${g_title//\//_}"
+  g_album="${g_album//\//_}"
 
   f_collect_metadata
 
