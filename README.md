@@ -34,6 +34,13 @@ audio codec used by YouTube. To save it in a different format, pass
 - `--no-transcode`: skip re-encoding entirely and remux/extract the native
   audio stream as-is (faster, no quality loss). Mutually exclusive with
   `-f`/`--format`.
+- `-i, --interactive`: for playlist URLs, preview each entry — thumbnail,
+  channel, title and duration — and choose which tracks to download, then pick
+  a single quality tier (`best`/`medium`/`low`) applied to the whole selection.
+  Requires an interactive terminal; ignored for single-track URLs. Thumbnails
+  are drawn with the first available image renderer (`kitty`'s `icat`, `chafa`,
+  `viu` or `timg`); when none is installed the thumbnail URL is printed
+  instead. Entry enumeration stays fast (no per-video probing).
 - `-t, --thumbnail`: embed the video's thumbnail into the audio file as cover
   art.
 - `--title <name>`: track title; also used as the output filename. Only valid
@@ -50,7 +57,9 @@ unset are prompted for interactively when the script is run from a terminal —
 piped or scripted invocations skip the prompts so a bare `ytdw <url>` stays
 fully unattended. `upload_date`, `duration` and `channel` are always taken
 from yt-dlp's own metadata and embedded automatically; they are never
-prompted for.
+prompted for. Playlist downloads also get a `track` tag (`N/total`) numbered
+over the set actually downloaded — so an interactive selection is numbered
+`1..N` across just the chosen tracks.
 
 ## Example use case
 

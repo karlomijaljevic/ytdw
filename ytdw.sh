@@ -55,6 +55,9 @@ g_title=""
 g_temp_dir=""
 g_temp_file=""
 g_is_playlist=0
+g_interactive=0
+g_img_renderer=""
+g_selected_urls=()
 
 # =========================== #
 # ======== FUNCTIONS ======== #
@@ -77,6 +80,9 @@ usage() {
   printf '                      no lossless source. "best" picks the highest available.\n' >&2
   printf '      --no-transcode  skip re-encoding; remux/extract the native stream as-is\n' >&2
   printf '                      (mutually exclusive with -f/--format)\n' >&2
+  printf '  -i, --interactive   for playlists: preview each entry (thumbnail,\n' >&2
+  printf '                      channel, title, duration) and pick which tracks\n' >&2
+  printf '                      to download, then one quality for all\n' >&2
   printf '  -t, --thumbnail     embed the video thumbnail as cover art\n' >&2
   printf '      --title         track title (single track only; also used as filename)\n' >&2
   printf '      --artist        artist tag to embed (applies to every track)\n' >&2
@@ -152,9 +158,13 @@ f_collect_metadata() {
 }
 
 # Downloads audio from a single URL into dir. Reports success/failure to stdout.
+# For playlist entries, track_number/total_tracks (args 3 and 4) are embedded as
+# the "track" tag (e.g. 3/12), numbered over the set actually being downloaded.
 f_dw_audio() {
   local url="$1"
   local dir="$2"
+  local track_number="${3:-}"
+  local total_tracks="${4:-}"
   local name
   local audio_format
   local pp_args="-q:a 0 -map a"
@@ -176,7 +186,7 @@ f_dw_audio() {
 
   if [[ "$g_no_transcode" -eq 1 ]]; then
     # yt-dlp's own "best" audio-format means "keep the native codec/container",
-    # i.e. remux without re-encoding — exactly what --no-transcode asks for.
+    # i.e. remux without re-encoding - exactly what --no-transcode asks for.
     audio_format="best"
   else
     audio_format="$g_audio_format"
@@ -188,13 +198,19 @@ f_dw_audio() {
   args+=(--embed-metadata)
   args+=(--parse-metadata "%(channel)s:%(meta_channel)s")
 
-  if [[ -n "$g_artist" || -n "$g_album" || -n "$g_description" || ( "$g_is_playlist" -eq 0 && -n "$g_title" ) ]]; then
-    local meta_pp="-metadata"
-    [[ -n "$g_artist" ]] && meta_pp+=" artist=$(f_shquote "$g_artist")"
-    [[ -n "$g_album" ]] && meta_pp+=" -metadata album=$(f_shquote "$g_album")"
-    [[ -n "$g_description" ]] && meta_pp+=" -metadata description=$(f_shquote "$g_description")"
-    [[ "$g_is_playlist" -eq 0 && -n "$g_title" ]] && meta_pp+=" -metadata title=$(f_shquote "$g_title")"
-    args+=(--postprocessor-args "Metadata:$meta_pp")
+  # Build the ffmpeg metadata args field by field. Each field carries its own
+  # -metadata so the set is order-independent (no field is special-cased as
+  # "first"); the leading space is trimmed before use.
+  local meta_pp=""
+  [[ -n "$g_artist" ]] && meta_pp+=" -metadata artist=$(f_shquote "$g_artist")"
+  [[ -n "$g_album" ]] && meta_pp+=" -metadata album=$(f_shquote "$g_album")"
+  [[ -n "$g_description" ]] && meta_pp+=" -metadata description=$(f_shquote "$g_description")"
+  [[ "$g_is_playlist" -eq 0 && -n "$g_title" ]] && meta_pp+=" -metadata title=$(f_shquote "$g_title")"
+  [[ "$g_is_playlist" -eq 1 && -n "$track_number" && -n "$total_tracks" ]] &&
+    meta_pp+=" -metadata track=$(f_shquote "$track_number/$total_tracks")"
+
+  if [[ -n "$meta_pp" ]]; then
+    args+=(--postprocessor-args "Metadata:${meta_pp# }")
   fi
 
   if [[ "$g_embed_thumbnail" -eq 1 ]]; then
@@ -224,9 +240,10 @@ f_dw_audio() {
   fi
 }
 
-# Enumerates a playlist's entries into a TSV temp file: url, title, id and a
-# preview-sized thumbnail URL per record. Groundwork for a future interactive
-# picker (see f_playlist_picker) — does not change current download behaviour.
+# Enumerates a playlist's entries into a TSV temp file, one record per line:
+# url, title, id, preview-sized thumbnail URL, channel, duration (seconds).
+# Uses --flat-playlist so it stays fast (no per-video metadata extraction); any
+# field yt-dlp cannot resolve at this depth is emitted as "NA".
 f_enumerate_playlist() {
   local url="$1"
   local out
@@ -237,27 +254,189 @@ f_enumerate_playlist() {
     --no-warnings \
     --flat-playlist \
     --ignore-errors \
-    --print-to-file "$(printf '%%(url)s\t%%(title)s\t%%(id)s\t%%(thumbnails.0.url)s')" \
+    --print-to-file \
+    "$(printf '%%(url)s\t%%(title)s\t%%(id)s\t%%(thumbnails.0.url)s\t%%(channel)s\t%%(duration)s')" \
     "$out" "$url"
 
   printf '%s' "$out"
 }
 
-# Stub for a future interactive playlist picker (choose tracks, preview
-# thumbnails). For now it passes every enumerated entry through unchanged so
-# playlist downloads behave exactly as before this groundwork was laid.
-# TODO: prompt the user with the title/thumbnail columns and return only the
-# selected subset of URLs.
+# Picks which image-rendering helper, if any, can draw thumbnails in this
+# terminal. Preference order: kitty's icat (only when actually inside kitty),
+# then the terminal-agnostic chafa / viu / timg. Leaves g_img_renderer empty
+# when none is available - the picker then falls back to printing the URL.
+f_detect_image_renderer() {
+  g_img_renderer=""
+
+  if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitty >/dev/null 2>&1; then
+    g_img_renderer="kitty"
+  elif command -v chafa >/dev/null 2>&1; then
+    g_img_renderer="chafa"
+  elif command -v viu >/dev/null 2>&1; then
+    g_img_renderer="viu"
+  elif command -v timg >/dev/null 2>&1; then
+    g_img_renderer="timg"
+  fi
+}
+
+# Formats a raw duration (seconds, possibly a float, "NA", or empty) as
+# H:MM:SS / M:SS for display. Anything non-numeric becomes "NA".
+f_fmt_duration() {
+  local secs="$1"
+  local h m s
+
+  secs="${secs%%.*}"
+  if [[ -z "$secs" || ! "$secs" =~ ^[0-9]+$ ]]; then
+    printf 'NA'
+    return 0
+  fi
+
+  h=$(( secs / 3600 ))
+  m=$(( (secs % 3600) / 60 ))
+  s=$(( secs % 60 ))
+
+  if [[ "$h" -gt 0 ]]; then
+    printf '%d:%02d:%02d' "$h" "$m" "$s"
+  else
+    printf '%d:%02d' "$m" "$s"
+  fi
+}
+
+# Draws a single thumbnail to the terminal. Fetches the preview image into the
+# temp dir with aria2c, then hands it to the detected renderer. Falls back to
+# printing the URL whenever there is no renderer, no usable URL, or any step
+# fails - the picker must never abort just because a preview could not be drawn.
+# All output goes to /dev/tty so it never contaminates captured output.
+f_render_thumbnail() {
+  local url="$1"
+  local id="$2"
+  local name="thumb-${id:-x}.img"
+  local file="$g_temp_dir/$name"
+
+  if [[ -z "$url" || "$url" == "NA" || -z "$g_img_renderer" ]]; then
+    [[ -n "$url" && "$url" != "NA" ]] && printf '  Thumbnail: %s\n' "$url" > /dev/tty
+    return 0
+  fi
+
+  if ! aria2c -q --allow-overwrite=true -d "$g_temp_dir" -o "$name" "$url" \
+    >/dev/null 2>&1; then
+    printf '  Thumbnail: %s\n' "$url" > /dev/tty
+    return 0
+  fi
+
+  # Each renderer reads from and writes to /dev/tty: kitty's icat performs a
+  # terminal-capability handshake over stdin, so it must talk to the real tty
+  # rather than whatever fd 0 the caller happens to have.
+  case "$g_img_renderer" in
+    kitty) kitty +kitten icat --align left "$file" < /dev/tty > /dev/tty 2>/dev/null ||
+      printf '  Thumbnail: %s\n' "$url" > /dev/tty ;;
+    chafa) chafa --size=42x21 "$file" < /dev/tty > /dev/tty 2>/dev/null ||
+      printf '  Thumbnail: %s\n' "$url" > /dev/tty ;;
+    viu) viu -w 42 "$file" < /dev/tty > /dev/tty 2>/dev/null ||
+      printf '  Thumbnail: %s\n' "$url" > /dev/tty ;;
+    timg) timg -g42x21 "$file" < /dev/tty > /dev/tty 2>/dev/null ||
+      printf '  Thumbnail: %s\n' "$url" > /dev/tty ;;
+  esac
+
+  rm -f "$file"
+  return 0
+}
+
+# Prompts once for the quality tier applied to every selected track, defaulting
+# to the current g_audio_quality (which already honours any -q/--quality flag).
+# Re-asks on invalid input instead of dying so a typo never loses the selection.
+f_prompt_batch_quality() {
+  local q valid ok
+
+  while :; do
+    q=""
+    read -rp \
+      "Quality for the ${#g_selected_urls[@]} selected track(s) [$g_valid_audio_qualities] (default: $g_audio_quality): " \
+      q < /dev/tty || q=""
+
+    [[ -z "$q" ]] && break
+
+    ok=0
+    for valid in $g_valid_audio_qualities; do
+      [[ "$q" == "$valid" ]] && ok=1 && break
+    done
+
+    if [[ "$ok" -eq 1 ]]; then
+      g_audio_quality="$q"
+      break
+    fi
+
+    printf 'Invalid quality. Choose one of: %s\n' \
+      "$g_valid_audio_qualities" > /dev/tty
+  done
+
+  printf 'Using quality tier: %s\n\n' "$g_audio_quality" > /dev/tty
+}
+
+# Resolves which playlist entries to download into the g_selected_urls array.
+# Without --interactive every enumerated entry is kept (original behaviour).
+# With --interactive each entry is previewed (thumbnail, channel, title,
+# duration, available quality tiers) and the user confirms it per track; a
+# single quality tier is then chosen for the whole batch. UI is read from and
+# written to /dev/tty so it never mixes with download output.
 f_playlist_picker() {
   local tsv="$1"
-  local -a urls=()
-  local url
+  local url title id thumb channel duration
 
-  while IFS=$'\t' read -r url _; do
-    [[ -n "$url" ]] && urls+=("$url")
-  done < "$tsv"
+  g_selected_urls=()
 
-  printf '%s\n' "${urls[@]}"
+  if [[ "$g_interactive" -ne 1 ]]; then
+    while IFS=$'\t' read -r url _; do
+      [[ -n "$url" ]] && g_selected_urls+=("$url")
+    done < "$tsv"
+    return 0
+  fi
+
+  f_detect_image_renderer
+
+  # Read every record up front so the loop body's stdin is never tied to the
+  # TSV file. An image renderer such as kitty's icat queries the terminal and
+  # reads the reply from stdin; if stdin were the TSV (via `done < "$tsv"`) it
+  # would swallow the remaining entries and the picker would stop after the
+  # first track. Iterating an in-memory array sidesteps that entirely.
+  local -a rows=()
+  mapfile -t rows < "$tsv"
+
+  local total="${#rows[@]}"
+  local idx=0 reply
+
+  printf '\nInteractive picker - %s track(s). Pick what to download.\n\n' \
+    "$total" > /dev/tty
+
+  local row
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r url title id thumb channel duration <<< "$row"
+    [[ -n "$url" ]] || continue
+    idx=$(( idx + 1 ))
+
+    f_render_thumbnail "$thumb" "$id"
+
+    printf "${c_green}[%d/%d]${c_normal}\n" "$idx" "$total" > /dev/tty
+    printf '  Channel:   %s\n' "${channel:-NA}" > /dev/tty
+    printf '  Title:     %s\n' "${title:-NA}" > /dev/tty
+    printf '  Duration:  %s\n' "$(f_fmt_duration "$duration")" > /dev/tty
+
+    reply=""
+    read -rp "  Download this track? [y/N] " reply < /dev/tty || reply=""
+    printf '\n' > /dev/tty
+
+    case "$reply" in
+      y|Y|yes|YES) g_selected_urls+=("$url") ;;
+      *) ;;
+    esac
+  done
+
+  if [[ "${#g_selected_urls[@]}" -eq 0 ]]; then
+    printf 'No tracks selected.\n' > /dev/tty
+    return 0
+  fi
+
+  f_prompt_batch_quality
 }
 
 # Determines whether the URL is a playlist or single track and dispatches downloads.
@@ -283,16 +462,25 @@ f_parse_data_and_dw() {
 
     g_temp_file="$(f_enumerate_playlist "$g_url")"
 
-    local -a urls
-    mapfile -t urls < <(f_playlist_picker "$g_temp_file")
+    # Called directly (not in a subshell): the interactive picker may set
+    # g_audio_quality for the whole batch, which would be lost across a pipe
+    # or process substitution. It populates the g_selected_urls array instead.
+    f_playlist_picker "$g_temp_file"
 
-    local url
-    for url in "${urls[@]}"; do
-      if ! f_dw_audio "$url" "$dir"; then
-        download_failed=1
-      fi
-      printf '\n'
-    done
+    if [[ "${#g_selected_urls[@]}" -gt 0 ]]; then
+      local url
+      local total="${#g_selected_urls[@]}"
+      local track=0
+      for url in "${g_selected_urls[@]}"; do
+        track=$(( track + 1 ))
+        if ! f_dw_audio "$url" "$dir" "$track" "$total"; then
+          download_failed=1
+        fi
+        printf '\n'
+      done
+    else
+      printf 'No tracks selected; nothing to download.\n'
+    fi
 
     rm -f "$g_temp_file"
     g_temp_file=""
@@ -329,6 +517,9 @@ f_main() {
         ;;
       --no-transcode)
         g_no_transcode=1
+        ;;
+      -i|--interactive)
+        g_interactive=1
         ;;
       -t|--thumbnail)
         g_embed_thumbnail=1
@@ -378,6 +569,15 @@ f_main() {
     die "--no-transcode and -f/--format are mutually exclusive"
 
   [[ "$g_url" == *"playlist"* ]] && g_is_playlist=1
+
+  if [[ "$g_interactive" -eq 1 && "$g_is_playlist" -eq 0 ]]; then
+    printf '%bnote: --interactive only applies to playlist URLs; ignoring.%b\n' \
+      "$c_red" "$c_normal" >&2
+    g_interactive=0
+  fi
+
+  [[ "$g_interactive" -eq 1 && ! -r /dev/tty ]] &&
+    die "--interactive requires an interactive terminal"
 
   [[ "$g_is_playlist" -eq 1 && -n "$g_title" ]] &&
     die "--title only applies to single-track URLs (use --album for playlists)"
